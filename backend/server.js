@@ -276,8 +276,16 @@ app.get('/api/statistics/departments', async (req, res) => {
     const users = await User.find();
     const clicks = await Click.find().populate('userId');
     
+    console.log('Total clicks encontrados:', clicks.length);
+    if (clicks.length > 0) {
+      console.log('Ejemplo de click:', JSON.stringify(clicks[0], null, 2));
+      console.log('userId del click:', clicks[0].userId);
+      console.log('Tipo de userId:', typeof clicks[0].userId);
+    }
+    
     const departments = {};
     
+    // Inicializar departamentos con usuarios
     users.forEach(user => {
       if (!departments[user.department]) {
         departments[user.department] = { total: 0, clicked: 0 };
@@ -285,9 +293,16 @@ app.get('/api/statistics/departments', async (req, res) => {
       departments[user.department].total++;
     });
 
+    // Contar clics por departamento
     clicks.forEach(click => {
-      if (click.userId && click.userId.department) {
-        departments[click.userId.department].clicked++;
+      if (click.userId) {
+        // Verificar si userId es un objeto (populado) o un ObjectId
+        const userId = click.userId._id ? click.userId._id : click.userId;
+        const user = click.userId.department ? click.userId : users.find(u => u._id.toString() === userId.toString());
+        
+        if (user && user.department && departments[user.department]) {
+          departments[user.department].clicked++;
+        }
       }
     });
 
@@ -295,11 +310,15 @@ app.get('/api/statistics/departments', async (req, res) => {
       department: dept,
       total: departments[dept].total,
       clicked: departments[dept].clicked,
-      rate: ((departments[dept].clicked / departments[dept].total) * 100).toFixed(1)
+      rate: departments[dept].total > 0 
+        ? ((departments[dept].clicked / departments[dept].total) * 100).toFixed(1)
+        : '0.0'
     }));
 
+    console.log('Resultado estadísticas:', result);
     res.json(result);
   } catch (error) {
+    console.error('Error en estadísticas:', error);
     res.status(500).json({ error: error.message });
   }
 });
