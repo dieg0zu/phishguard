@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
+const PDFDocument = require('pdfkit');
 
 const app = express();
 app.use(cors());
@@ -410,6 +411,163 @@ app.post('/api/certificates/generate', async (req, res) => {
     res.json({ success: true, certificate });
   } catch (error) {
     res.status(400).json({ error: error.message });
+  }
+});
+
+app.get('/api/certificates/download/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const progress = await EducationProgress.findOne({ userId });
+    const user = await User.findById(userId);
+
+    if (!user) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    if (!progress || progress.completedModules.length < 3) {
+      return res.status(400).json({ error: 'No se han completado todos los módulos' });
+    }
+
+    // Generar ID del certificado
+    const certificateId = crypto.randomBytes(8).toString('hex').toUpperCase();
+    const date = new Date().toLocaleDateString('es-ES', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+
+    // Crear PDF
+    const doc = new PDFDocument({
+      size: 'A4',
+      layout: 'landscape',
+      margins: { top: 50, bottom: 50, left: 50, right: 50 }
+    });
+
+    // Configurar headers para descarga
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="certificado-${user.name.replace(/\s+/g, '-')}.pdf"`);
+
+    // Pipe del PDF a la respuesta
+    doc.pipe(res);
+
+    // Fondo decorativo
+    doc.rect(0, 0, doc.page.width, doc.page.height)
+       .fillColor('#f8f9fa')
+       .fill();
+
+    // Borde decorativo
+    doc.strokeColor('#3b82f6')
+       .lineWidth(10)
+       .rect(20, 20, doc.page.width - 40, doc.page.height - 40)
+       .stroke();
+
+    // Título principal
+    doc.fillColor('#1e40af')
+       .fontSize(48)
+       .font('Helvetica-Bold')
+       .text('CERTIFICADO DE CAPACITACIÓN', {
+         align: 'center',
+         y: 150
+       });
+
+    // Subtítulo
+    doc.fillColor('#3b82f6')
+       .fontSize(24)
+       .font('Helvetica')
+       .text('PhishGuard', {
+         align: 'center',
+         y: 220
+       });
+
+    // Texto de certificación
+    doc.fillColor('#1f2937')
+       .fontSize(20)
+       .font('Helvetica')
+       .text('Se certifica que', {
+         align: 'center',
+         y: 300
+       });
+
+    // Nombre del usuario
+    doc.fillColor('#1e40af')
+       .fontSize(36)
+       .font('Helvetica-Bold')
+       .text(user.name.toUpperCase(), {
+         align: 'center',
+         y: 340
+       });
+
+    // Descripción
+    doc.fillColor('#4b5563')
+       .fontSize(18)
+       .font('Helvetica')
+       .text('ha completado exitosamente el programa de capacitación', {
+         align: 'center',
+         y: 400
+       });
+
+    doc.text('en Seguridad Informática y Prevención de Phishing', {
+      align: 'center',
+      y: 430
+    });
+
+    // Módulos completados
+    doc.fillColor('#059669')
+       .fontSize(16)
+       .font('Helvetica-Bold')
+       .text(`Módulos completados: ${progress.completedModules.length}`, {
+         align: 'center',
+         y: 480
+       });
+
+    // Fecha
+    doc.fillColor('#6b7280')
+       .fontSize(14)
+       .font('Helvetica')
+       .text(`Fecha de emisión: ${date}`, {
+         align: 'center',
+         y: 520
+       });
+
+    // ID del certificado
+    doc.fillColor('#9ca3af')
+       .fontSize(12)
+       .font('Helvetica-Oblique')
+       .text(`ID del Certificado: ${certificateId}`, {
+         align: 'center',
+         y: 550
+       });
+
+    // Línea de firma
+    doc.moveTo(150, doc.page.height - 120)
+       .lineTo(350, doc.page.height - 120)
+       .strokeColor('#1f2937')
+       .lineWidth(1)
+       .stroke();
+
+    doc.fillColor('#4b5563')
+       .fontSize(12)
+       .font('Helvetica')
+       .text('Firma Autorizada', {
+         align: 'left',
+         x: 150,
+         y: doc.page.height - 100
+       });
+
+    // Finalizar PDF
+    doc.end();
+
+    // Marcar certificado como generado si no lo estaba
+    if (!progress.certificateGenerated) {
+      progress.certificateGenerated = true;
+      await progress.save();
+    }
+
+  } catch (error) {
+    console.error('Error generando certificado:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
   }
 });
 
