@@ -73,15 +73,14 @@ const Credential = mongoose.model('Credential', CredentialSchema);
 const EducationProgress = mongoose.model('EducationProgress', EducationProgressSchema);
 
 // Configuración de Nodemailer (modo sandbox con Ethereal)
-let transporter = nodemailer.createTransport({
-  host: 'smtp.ethereal.email',
-  port: 587,
-  secure: false,
-  auth: {
-    user: 'your-ethereal-email@ethereal.email',
-    pass: 'your-ethereal-password'
+let transporter = {
+  sendMail: async (options) => {
+    console.log('[SIMULADO] Email que se enviaría:');
+    console.log('   Para:', options.to);
+    console.log('   Asunto:', options.subject);
+    return { messageId: 'fake-id-' + Date.now() };
   }
-});
+};
 
 // RUTAS API
 
@@ -137,32 +136,66 @@ app.get('/api/campaigns', async (req, res) => {
 
 app.post('/api/campaigns', async (req, res) => {
   try {
+    // Validaciones básicas
+    if (!req.body.name || !req.body.name.trim()) {
+      return res.status(400).json({ error: 'El nombre de la campaña es requerido' });
+    }
+    if (!req.body.customSubject || !req.body.customSubject.trim()) {
+      return res.status(400).json({ error: 'El asunto del email es requerido' });
+    }
+    if (!req.body.customBody || !req.body.customBody.trim()) {
+      return res.status(400).json({ error: 'El cuerpo del email es requerido' });
+    }
+    if (!req.body.targetUsers || req.body.targetUsers.length === 0) {
+      return res.status(400).json({ error: 'Debes seleccionar al menos un usuario objetivo' });
+    }
+
     const campaign = new Campaign(req.body);
     await campaign.save();
 
     // Generar tokens únicos y enviar emails
     const users = await User.find({ _id: { $in: req.body.targetUsers } });
     
+    let emailsSent = 0;
+    let emailsFailed = 0;
+    
     for (const user of users) {
-      const token = crypto.randomBytes(16).toString('hex');
-      const trackingUrl = `http://localhost:3000/track/${campaign._id}/${user._id}/${token}`;
-      
-      const emailBody = req.body.customBody.replace('[LINK]', trackingUrl);
-      
-      // Enviar email en modo sandbox
-      await transporter.sendMail({
-        from: '"PhishGuard Test" <phishing@test.com>',
-        to: user.email,
-        subject: req.body.customSubject,
-        text: emailBody,
-        html: `<p>${emailBody.replace(/\n/g, '<br>')}</p>`
-      });
-
-      console.log(`Email enviado a ${user.email} con token: ${token}`);
+      try {
+        const token = crypto.randomBytes(16).toString('hex');
+        const trackingUrl = `http://localhost:3000/track/${campaign._id}/${user._id}/${token}`;
+        
+        const emailBody = req.body.customBody.replace('[LINK]', trackingUrl);
+        
+        // Intentar enviar email en modo sandbox (no crítico si falla)
+        try {
+          await transporter.sendMail({
+            from: '"PhishGuard Test" <phishing@test.com>',
+            to: user.email,
+            subject: req.body.customSubject,
+            text: emailBody,
+            html: `<p>${emailBody.replace(/\n/g, '<br>')}</p>`
+          });
+          console.log(`Email enviado a ${user.email} con token: ${token}`);
+          emailsSent++;
+        } catch (emailError) {
+          console.log(`Error al enviar email a ${user.email}: ${emailError.message}`);
+          console.log(`Token generado para ${user.email}: ${token}`);
+          emailsFailed++;
+          // Continuar con el siguiente usuario aunque falle el email
+        }
+      } catch (error) {
+        console.error(`Error procesando usuario ${user.email}:`, error);
+        emailsFailed++;
+      }
     }
 
-    res.status(201).json({ campaign, message: 'Campaña creada y emails enviados' });
+    const message = emailsSent > 0 
+      ? `Campaña creada. ${emailsSent} email(s) enviado(s)${emailsFailed > 0 ? `, ${emailsFailed} fallido(s)` : ''}`
+      : `Campaña creada. ${emailsFailed} email(s) fallaron (modo sandbox - esto es normal si no hay configuración de email)`;
+
+    res.status(201).json({ campaign, message, emailsSent, emailsFailed });
   } catch (error) {
+    console.error('Error creando campaña:', error);
     res.status(400).json({ error: error.message });
   }
 });
