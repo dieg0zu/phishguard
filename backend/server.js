@@ -1,4 +1,5 @@
 // server.js - Backend Node.js + Express + MongoDB
+require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -9,6 +10,8 @@ const PDFDocument = require('pdfkit');
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static('public')); // Para servir archivos estáticos
 
 // Conexión a MongoDB
 mongoose.connect('mongodb://localhost:27017/phishguard', {
@@ -73,15 +76,40 @@ const Click = mongoose.model('Click', ClickSchema);
 const Credential = mongoose.model('Credential', CredentialSchema);
 const EducationProgress = mongoose.model('EducationProgress', EducationProgressSchema);
 
-// Configuración de Nodemailer (modo sandbox con Ethereal)
-let transporter = {
-  sendMail: async (options) => {
-    console.log('[SIMULADO] Email que se enviaría:');
-    console.log('   Para:', options.to);
-    console.log('   Asunto:', options.subject);
-    return { messageId: 'fake-id-' + Date.now() };
-  }
-};
+// Configuración de Nodemailer (modo real con SMTP)
+let transporter;
+
+// Inicializar transporter con configuración SMTP real
+if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+  transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT || '587'),
+    secure: process.env.SMTP_SECURE === 'true', // true para 465, false para otros puertos
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    },
+    tls: {
+      rejectUnauthorized: process.env.SMTP_TLS_REJECT === 'true'
+    }
+  });
+  
+  console.log('✅ Nodemailer configurado con SMTP real');
+  console.log(`   Host: ${process.env.SMTP_HOST}`);
+  console.log(`   Usuario: ${process.env.SMTP_USER}`);
+} else {
+  // Fallback a modo simulado si no hay configuración
+  console.warn('⚠️  No se encontró configuración SMTP. Usando modo simulado.');
+  console.warn('   Configura las variables SMTP_HOST, SMTP_USER, SMTP_PASS en .env');
+  transporter = {
+    sendMail: async (options) => {
+      console.log('[SIMULADO] Email que se enviaría:');
+      console.log('   Para:', options.to);
+      console.log('   Asunto:', options.subject);
+      return { messageId: 'fake-id-' + Date.now() };
+    }
+  };
+}
 
 // RUTAS API
 
@@ -160,27 +188,34 @@ app.post('/api/campaigns', async (req, res) => {
     let emailsSent = 0;
     let emailsFailed = 0;
     
+    // Obtener URL base del servidor (configurable o por defecto)
+    const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 5000}`;
+    const fromEmail = process.env.FROM_EMAIL || 'phishing@test.com';
+    const fromName = process.env.FROM_NAME || 'PhishGuard Test';
+    
     for (const user of users) {
       try {
         const token = crypto.randomBytes(16).toString('hex');
-        const trackingUrl = `http://localhost:3000/track/${campaign._id}/${user._id}/${token}`;
+        const trackingUrl = `${baseUrl}/track/${campaign._id}/${user._id}/${token}`;
         
         const emailBody = req.body.customBody.replace('[LINK]', trackingUrl);
         
-        // Intentar enviar email en modo sandbox (no crítico si falla)
+        // Enviar email real
         try {
           await transporter.sendMail({
-            from: '"PhishGuard Test" <phishing@test.com>',
+            from: `"${fromName}" <${fromEmail}>`,
             to: user.email,
             subject: req.body.customSubject,
             text: emailBody,
-            html: `<p>${emailBody.replace(/\n/g, '<br>')}</p>`
+            html: `<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+              ${emailBody.replace(/\n/g, '<br>')}
+            </div>`
           });
-          console.log(`Email enviado a ${user.email} con token: ${token}`);
+          console.log(`✅ Email enviado a ${user.email} con token: ${token}`);
           emailsSent++;
         } catch (emailError) {
-          console.log(`Error al enviar email a ${user.email}: ${emailError.message}`);
-          console.log(`Token generado para ${user.email}: ${token}`);
+          console.error(`❌ Error al enviar email a ${user.email}:`, emailError.message);
+          console.log(`   Token generado para ${user.email}: ${token}`);
           emailsFailed++;
           // Continuar con el siguiente usuario aunque falle el email
         }
@@ -192,7 +227,7 @@ app.post('/api/campaigns', async (req, res) => {
 
     const message = emailsSent > 0 
       ? `Campaña creada. ${emailsSent} email(s) enviado(s)${emailsFailed > 0 ? `, ${emailsFailed} fallido(s)` : ''}`
-      : `Campaña creada. ${emailsFailed} email(s) fallaron (modo sandbox - esto es normal si no hay configuración de email)`;
+      : `Campaña creada. ${emailsFailed} email(s) fallaron. Verifica tu configuración SMTP en el archivo .env`;
 
     res.status(201).json({ campaign, message, emailsSent, emailsFailed });
   } catch (error) {
@@ -211,6 +246,90 @@ app.get('/api/campaigns/:id', async (req, res) => {
 });
 
 // === TRACKING ===
+// Endpoint GET para tracking real de clics desde links en emails
+app.get('/track/:campaignId/:userId/:token', async (req, res) => {
+  try {
+    const { campaignId, userId, token } = req.params;
+    
+    // Obtener IP y User-Agent del request
+    const ipAddress = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    
+    // Verificar que la campaña y el usuario existen
+    const campaign = await Campaign.findById(campaignId);
+    const user = await User.findById(userId);
+    
+    if (!campaign || !user) {
+      return res.status(404).send('Página no encontrada');
+    }
+    
+    // Registrar el clic
+    const click = new Click({
+      campaignId,
+      userId,
+      token,
+      ipAddress,
+      userAgent
+    });
+    await click.save();
+
+    // Actualizar contador de clicks en campaña
+    await Campaign.findByIdAndUpdate(campaignId, { $inc: { clicks: 1 } });
+    
+    console.log(`✅ Clic registrado: Campaña ${campaignId}, Usuario ${user.email}, IP: ${ipAddress}`);
+    
+    // Redirigir a la página de phishing simulada
+    res.redirect(`/phishing/${campaignId}/${userId}`);
+  } catch (error) {
+    console.error('Error en tracking de clic:', error);
+    res.status(500).send('Error interno del servidor');
+  }
+});
+
+// Endpoint POST para recibir credenciales desde la página de phishing
+app.post('/track/phishing', async (req, res) => {
+  try {
+    const { campaignId, userId, email, password } = req.body;
+    
+    if (!campaignId || !userId) {
+      return res.status(400).json({ error: 'Faltan parámetros requeridos' });
+    }
+    
+    // Verificar que la campaña y el usuario existen
+    const campaign = await Campaign.findById(campaignId);
+    const user = await User.findById(userId);
+    
+    if (!campaign || !user) {
+      return res.status(404).json({ error: 'Campaña o usuario no encontrado' });
+    }
+    
+    // Registrar el intento de credenciales
+    const credential = new Credential({
+      campaignId,
+      userId,
+      attempted: true
+    });
+    await credential.save();
+
+    // Actualizar contador de credenciales en campaña
+    await Campaign.findByIdAndUpdate(campaignId, { $inc: { credentials: 1 } });
+    
+    console.log(`⚠️  Credenciales capturadas: Campaña ${campaignId}, Usuario ${user.email}`);
+    console.log(`   Email intentado: ${email || 'N/A'}`);
+    
+    // Responder con éxito (la página mostrará un mensaje)
+    res.json({ 
+      success: true, 
+      message: 'Credenciales registradas',
+      redirect: '/phishing/success'
+    });
+  } catch (error) {
+    console.error('Error en tracking de credenciales:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+// Endpoint POST para tracking manual (mantener compatibilidad con frontend)
 app.post('/api/track/click', async (req, res) => {
   try {
     const { campaignId, userId, token, ipAddress, userAgent } = req.body;
@@ -233,6 +352,7 @@ app.post('/api/track/click', async (req, res) => {
   }
 });
 
+// Endpoint POST para tracking manual de credenciales (mantener compatibilidad con frontend)
 app.post('/api/track/credentials', async (req, res) => {
   try {
     const { campaignId, userId } = req.body;
@@ -631,7 +751,7 @@ app.post('/api/init', async (req, res) => {
 
     // Crear usuarios de prueba
     const users = await User.insertMany([
-      { name: 'Juan Pérez', email: 'juan@empresa.com', department: 'Ventas' },
+      { name: 'Diego Gaaaa', email: 'diego123ali@gmail.com', department: 'Ventas' },
       { name: 'María García', email: 'maria@empresa.com', department: 'IT' },
       { name: 'Carlos López', email: 'carlos@empresa.com', department: 'Finanzas' },
       { name: 'Ana Martínez', email: 'ana@empresa.com', department: 'RRHH' },
@@ -663,8 +783,267 @@ app.post('/api/init', async (req, res) => {
   }
 });
 
+// === PÁGINAS DE PHISHING SIMULADAS ===
+// Página de phishing que captura credenciales
+app.get('/phishing/:campaignId/:userId', async (req, res) => {
+  try {
+    const { campaignId, userId } = req.params;
+    
+    // Verificar que la campaña y el usuario existen
+    const campaign = await Campaign.findById(campaignId);
+    const user = await User.findById(userId);
+    
+    if (!campaign || !user) {
+      return res.status(404).send('Página no encontrada');
+    }
+    
+    // Servir página HTML de phishing
+    const phishingPage = `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verificación de Cuenta</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            padding: 40px;
+            max-width: 400px;
+            width: 100%;
+        }
+        .logo {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .logo h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        .logo p {
+            color: #666;
+            font-size: 14px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+            font-size: 14px;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .btn {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        .btn:active {
+            transform: translateY(0);
+        }
+        .error {
+            color: #e74c3c;
+            font-size: 14px;
+            margin-top: 10px;
+            display: none;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <h1>🔒 Verificación Requerida</h1>
+            <p>Por favor, verifica tu identidad para continuar</p>
+        </div>
+        <form id="phishingForm">
+            <div class="form-group">
+                <label for="email">Correo Electrónico</label>
+                <input type="email" id="email" name="email" required autocomplete="email">
+            </div>
+            <div class="form-group">
+                <label for="password">Contraseña</label>
+                <input type="password" id="password" name="password" required autocomplete="current-password">
+            </div>
+            <button type="submit" class="btn" id="submitBtn">Verificar Cuenta</button>
+            <div class="error" id="errorMsg"></div>
+            <div class="loading" id="loading">Procesando...</div>
+        </form>
+    </div>
+    <script>
+        document.getElementById('phishingForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const submitBtn = document.getElementById('submitBtn');
+            const errorMsg = document.getElementById('errorMsg');
+            const loading = document.getElementById('loading');
+            
+            // Deshabilitar botón y mostrar loading
+            submitBtn.disabled = true;
+            loading.style.display = 'block';
+            errorMsg.style.display = 'none';
+            
+            try {
+                const response = await fetch('/track/phishing', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        campaignId: '${campaignId}',
+                        userId: '${userId}',
+                        email: email,
+                        password: password
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Redirigir a página de éxito
+                    window.location.href = '/phishing/success';
+                } else {
+                    throw new Error(data.error || 'Error al procesar');
+                }
+            } catch (error) {
+                errorMsg.textContent = 'Error: ' + error.message;
+                errorMsg.style.display = 'block';
+                submitBtn.disabled = false;
+                loading.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>
+    `;
+    
+    res.send(phishingPage);
+  } catch (error) {
+    console.error('Error sirviendo página de phishing:', error);
+    res.status(500).send('Error interno del servidor');
+  }
+});
+
+// Página de éxito después de capturar credenciales
+app.get('/phishing/success', (req, res) => {
+  const successPage = `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verificación Exitosa</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+        }
+        .success-icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 15px;
+        }
+        p {
+            color: #666;
+            font-size: 16px;
+            line-height: 1.6;
+            margin-bottom: 20px;
+        }
+        .warning {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+        .warning p {
+            color: #856404;
+            font-size: 14px;
+            margin: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="success-icon">✅</div>
+        <h1>Verificación Completada</h1>
+        <p>Gracias por verificar tu cuenta. Tu sesión ha sido actualizada correctamente.</p>
+        <div class="warning">
+            <p><strong>⚠️ Nota de Seguridad:</strong> Esta fue una simulación de phishing como parte de un programa de capacitación en seguridad. En un escenario real, nunca debes ingresar tus credenciales en enlaces recibidos por email sin verificar primero la autenticidad del remitente.</p>
+        </div>
+    </div>
+</body>
+</html>
+  `;
+  
+  res.send(successPage);
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Servidor ejecutándose en puerto ${PORT}`);
   console.log('PhishGuard Backend iniciado correctamente');
+  console.log(`URL base: ${process.env.BASE_URL || `http://localhost:${PORT}`}`);
 });
