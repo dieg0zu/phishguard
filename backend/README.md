@@ -98,3 +98,4 @@ El sistema ahora incluye:
 - No usar credenciales reales en producción
 - Cumplir con todas las regulaciones locales sobre seguridad de datos
 
+
