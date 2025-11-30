@@ -738,6 +738,294 @@ app.get('/api/reports/vulnerability', async (req, res) => {
   }
 });
 
+// Endpoint para generar reporte completo en PDF
+app.get('/api/reports/download', async (req, res) => {
+  try {
+    // Obtener todos los datos necesarios
+    const users = await User.find();
+    const campaigns = await Campaign.find();
+    const clicks = await Click.find();
+    const credentials = await Credential.find();
+
+    // Calcular estadísticas del Panel
+    const totalClicks = clicks.length;
+    const totalCredentials = credentials.length;
+    const totalEmails = campaigns.reduce((sum, c) => sum + c.targetUsers.length, 0);
+
+    const userStats = await Promise.all(users.map(async user => {
+      const userClicks = clicks.filter(c => c.userId.toString() === user._id.toString()).length;
+      const userCreds = credentials.filter(c => c.userId.toString() === user._id.toString()).length;
+      return {
+        userId: user._id,
+        name: user.name,
+        department: user.department,
+        clicks: userClicks,
+        credentials: userCreds,
+        risk: userCreds > 1 ? 'Alto' : userClicks > 2 ? 'Medio' : 'Bajo',
+        riskLevel: userCreds > 1 ? 'high' : userClicks > 2 ? 'medium' : 'low'
+      };
+    }));
+
+    const highRisk = userStats.filter(u => u.riskLevel === 'high').length;
+    const mediumRisk = userStats.filter(u => u.riskLevel === 'medium').length;
+    const lowRisk = userStats.filter(u => u.riskLevel === 'low').length;
+    const avgClickRate = totalEmails > 0 ? ((totalClicks / totalEmails) * 100).toFixed(1) : 0;
+
+    // Calcular estadísticas por departamento
+    const departments = {};
+    users.forEach(user => {
+      if (!departments[user.department]) {
+        departments[user.department] = { total: 0, clicked: 0 };
+      }
+      departments[user.department].total++;
+    });
+
+    clicks.forEach(click => {
+      if (click.userId) {
+        const userId = click.userId._id ? click.userId._id : click.userId;
+        const user = click.userId.department ? click.userId : users.find(u => u._id.toString() === userId.toString());
+        if (user && user.department && departments[user.department]) {
+          departments[user.department].clicked++;
+        }
+      }
+    });
+
+    const departmentStats = Object.keys(departments).map(dept => ({
+      department: dept,
+      total: departments[dept].total,
+      clicked: departments[dept].clicked,
+      rate: departments[dept].total > 0 
+        ? ((departments[dept].clicked / departments[dept].total) * 100).toFixed(1)
+        : '0.0'
+    }));
+
+    // Crear PDF
+    const doc = new PDFDocument({
+      size: 'A4',
+      margins: { top: 50, bottom: 50, left: 50, right: 50 }
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="reporte-phishguard.pdf"');
+    doc.pipe(res);
+
+    // Portada
+    doc.fillColor('#1e40af')
+       .fontSize(32)
+       .font('Helvetica-Bold')
+       .text('REPORTE PHISHGUARD', { align: 'center', y: 100 });
+
+    doc.fillColor('#3b82f6')
+       .fontSize(18)
+       .font('Helvetica')
+       .text('Reporte de Seguridad y Estadísticas', { align: 'center', y: 140 });
+
+    const date = new Date().toLocaleDateString('es-ES', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+    doc.fillColor('#6b7280')
+       .fontSize(12)
+       .text(`Fecha de generación: ${date}`, { align: 'center', y: 170 });
+
+    // Nueva página - Panel
+    doc.addPage();
+    doc.fillColor('#1e40af')
+       .fontSize(24)
+       .font('Helvetica-Bold')
+       .text('PANEL DE CONTROL', { y: 50 });
+
+    // Métricas principales
+    doc.fillColor('#1f2937')
+       .fontSize(16)
+       .font('Helvetica-Bold')
+       .text('Métricas Principales', { y: 90 });
+
+    let yPos = 120;
+    doc.fillColor('#374151')
+       .fontSize(12)
+       .font('Helvetica')
+       .text(`Total de Usuarios: ${users.length}`, { y: yPos });
+    yPos += 20;
+    doc.text(`Total de Campañas: ${campaigns.length}`, { y: yPos });
+    yPos += 20;
+    doc.fillColor('#dc2626')
+       .text(`Riesgo Alto: ${highRisk}`, { y: yPos });
+    yPos += 20;
+    doc.fillColor('#f59e0b')
+       .text(`Riesgo Medio: ${mediumRisk}`, { y: yPos });
+    yPos += 20;
+    doc.fillColor('#10b981')
+       .text(`Riesgo Bajo: ${lowRisk}`, { y: yPos });
+    yPos += 20;
+    doc.fillColor('#3b82f6')
+       .text(`Tasa Promedio de Clics: ${avgClickRate}%`, { y: yPos });
+
+    // Distribución de Riesgo
+    yPos += 40;
+    doc.fillColor('#1f2937')
+       .fontSize(16)
+       .font('Helvetica-Bold')
+       .text('Distribución de Riesgo', { y: yPos });
+
+    yPos += 25;
+    doc.fillColor('#dc2626')
+       .fontSize(12)
+       .font('Helvetica')
+       .text(`Alto: ${highRisk} usuarios`, { y: yPos });
+    yPos += 20;
+    doc.fillColor('#f59e0b')
+       .text(`Medio: ${mediumRisk} usuarios`, { y: yPos });
+    yPos += 20;
+    doc.fillColor('#10b981')
+       .text(`Bajo: ${lowRisk} usuarios`, { y: yPos });
+
+    // Recomendaciones
+    yPos += 40;
+    doc.fillColor('#1f2937')
+       .fontSize(16)
+       .font('Helvetica-Bold')
+       .text('Recomendaciones', { y: yPos });
+
+    yPos += 25;
+    const recommendations = [
+      'Reforzar capacitación en departamentos de alto riesgo',
+      'Implementar autenticación de dos factores',
+      'Realizar simulaciones mensuales',
+      'Crear política de verificación de emails'
+    ];
+    doc.fillColor('#374151')
+       .fontSize(11)
+       .font('Helvetica')
+    recommendations.forEach((rec, idx) => {
+      doc.text(`${idx + 1}. ${rec}`, { y: yPos });
+      yPos += 18;
+    });
+
+    // Nueva página - Estadísticas
+    doc.addPage();
+    doc.fillColor('#1e40af')
+       .fontSize(24)
+       .font('Helvetica-Bold')
+       .text('ESTADÍSTICAS', { y: 50 });
+
+    // Efectividad por Departamento
+    doc.fillColor('#1f2937')
+       .fontSize(16)
+       .font('Helvetica-Bold')
+       .text('Efectividad por Departamento', { y: 90 });
+
+    yPos = 120;
+    doc.fillColor('#374151')
+       .fontSize(11)
+       .font('Helvetica-Bold')
+       .text('Departamento', 50, yPos)
+       .text('Total Usuarios', 200, yPos)
+       .text('Clics Recibidos', 320, yPos)
+       .text('Tasa (%)', 450, yPos);
+
+    yPos += 20;
+    doc.strokeColor('#e5e7eb')
+       .lineWidth(0.5)
+       .moveTo(50, yPos - 5)
+       .lineTo(550, yPos - 5)
+       .stroke();
+
+    departmentStats.forEach(dept => {
+      doc.fillColor('#374151')
+         .fontSize(10)
+         .font('Helvetica')
+         .text(dept.department, 50, yPos)
+         .text(dept.total.toString(), 200, yPos)
+         .text(dept.clicked.toString(), 320, yPos)
+         .text(`${dept.rate}%`, 450, yPos);
+      yPos += 18;
+    });
+
+    // Tasa de Clics por Departamento
+    yPos += 20;
+    doc.fillColor('#1f2937')
+       .fontSize(16)
+       .font('Helvetica-Bold')
+       .text('Tasa de Clics por Departamento', { y: yPos });
+
+    yPos += 25;
+    departmentStats.forEach(dept => {
+      const rate = parseFloat(dept.rate) || 0;
+      doc.fillColor('#374151')
+         .fontSize(11)
+         .font('Helvetica')
+         .text(`${dept.department}: ${rate.toFixed(1)}% (${dept.clicked}/${dept.total} clics)`, { y: yPos });
+      yPos += 18;
+    });
+
+    // Detalle por Usuario
+    if (yPos > 700) {
+      doc.addPage();
+      yPos = 50;
+    } else {
+      yPos += 30;
+    }
+
+    doc.fillColor('#1f2937')
+       .fontSize(16)
+       .font('Helvetica-Bold')
+       .text('Detalle por Usuario', { y: yPos });
+
+    yPos += 25;
+    doc.fillColor('#374151')
+       .fontSize(10)
+       .font('Helvetica-Bold')
+       .text('Usuario', 50, yPos)
+       .text('Departamento', 150, yPos)
+       .text('Clics', 250, yPos)
+       .text('Credenciales', 320, yPos)
+       .text('Riesgo', 420, yPos);
+
+    yPos += 20;
+    doc.strokeColor('#e5e7eb')
+       .lineWidth(0.5)
+       .moveTo(50, yPos - 5)
+       .lineTo(550, yPos - 5)
+       .stroke();
+
+    userStats.forEach(user => {
+      if (yPos > 750) {
+        doc.addPage();
+        yPos = 50;
+      }
+      
+      doc.fillColor('#374151')
+         .fontSize(9)
+         .font('Helvetica')
+         .text(user.name, 50, yPos, { width: 100 })
+         .text(user.department, 150, yPos, { width: 100 })
+         .text(user.clicks.toString(), 250, yPos)
+         .text(user.credentials.toString(), 320, yPos);
+      
+      // Color según riesgo
+      if (user.riskLevel === 'high') {
+        doc.fillColor('#dc2626');
+      } else if (user.riskLevel === 'medium') {
+        doc.fillColor('#f59e0b');
+      } else {
+        doc.fillColor('#10b981');
+      }
+      doc.text(user.risk, 420, yPos);
+      
+      yPos += 18;
+    });
+
+    doc.end();
+  } catch (error) {
+    console.error('Error generando reporte:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
 // Inicializar datos de prueba
 app.post('/api/init', async (req, res) => {
   try {
@@ -751,7 +1039,7 @@ app.post('/api/init', async (req, res) => {
 
     // Crear usuarios de prueba
     const users = await User.insertMany([
-      { name: 'Diego Gaaaa', email: 'diego123ali@gmail.com', department: 'Ventas' },
+      { name: 'Diego Gaaaa', email: 'arbeloas940@gmail.com', department: 'Ventas' },
       { name: 'María García', email: 'maria@empresa.com', department: 'IT' },
       { name: 'Carlos López', email: 'carlos@empresa.com', department: 'Finanzas' },
       { name: 'Ana Martínez', email: 'ana@empresa.com', department: 'RRHH' },
